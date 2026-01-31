@@ -9,7 +9,6 @@ def load_files(file_list):
     loaded_data = []
     for f in file_list:
         data, fs = sf.read(f)
-        # Ensure mono
         if data.ndim > 1:
             data = data[:, 0]
         loaded_data.append(data)
@@ -17,147 +16,100 @@ def load_files(file_list):
 
 
 def evaluate():
-    print("--- Evaluating Results: Raw vs. Soft Mask vs. Hybrid Mask ---")
+    print("--- Evaluating Results: Raw vs. FaSNet vs. MVDR vs. MVDR Polish ---")
 
-    # 1. Define File Groups
-    ref_files = ['ref1.wav', 'ref2.wav']
+    # 1. Define File Groups based on your specifications
+    ref_files = ['ref1_16k.wav', 'ref2_16k.wav']
     mix_file = 'mix_4ch_tac.wav'
 
-    # Group A: Raw Model Output
-    raw_files = ['fasnet_output_1.wav', 'fasnet_output_2.wav']
+    fasnet_files = ['fasnet_output_1.wav', 'fasnet_output_2.wav']
+    mvdr_files = ['fasnet_mvdr_hybrid_1.wav', 'fasnet_mvdr_hybrid_2.wav']
+    polish_files = ['fasnet_final_1.wav', 'fasnet_final_2.wav']
 
-    # Group B: Soft Mask Output (Original Post-Process)
-    # Ensure you ran post_process.py (soft mask) to generate these
-    soft_files = ['fasnet_masked_1.wav', 'fasnet_masked_2.wav']
+    # 2. Check File Existence
+    def check_group(group_name, files):
+        exists = all(os.path.exists(f) for f in files)
+        if not exists:
+            print(f"Warning: {group_name} files not found. Skipping column.")
+        return exists
 
-    # Group C: Hybrid/Hard Output (Current Post-Process)
-    # Ensure you ran post_process_hybrid.py to generate these
-    hybrid_files = ['fasnet_mvdr_hybrid_1.wav', 'fasnet_mvdr_hybrid_2.wav']
+    has_refs = check_group("Reference", ref_files)
+    has_mix = os.path.exists(mix_file)
+    has_fasnet = check_group("FaSNet Output", fasnet_files)
+    has_mvdr = check_group("MVDR Hybrid", mvdr_files)
+    has_polish = check_group("MVDR Polish", polish_files)
 
-    # 2. Check Files
-    required = ref_files + [mix_file] + raw_files
-    if not all(os.path.exists(f) for f in required):
-        print(f"Error: Missing core files. Please ensure {required} exist.")
+    if not has_refs or not has_mix:
+        print("Error: Reference or Mixture files are missing. Cannot evaluate.")
         return
-
-    has_soft = all(os.path.exists(f) for f in soft_files)
-    has_hybrid = all(os.path.exists(f) for f in hybrid_files)
-
-    if not has_soft:
-        print("Warning: 'fasnet_masked' (Soft) files not found. Skipping Soft column.")
-    if not has_hybrid:
-        print("Warning: 'fasnet_hybrid' files not found. Skipping Hybrid column.")
 
     # 3. Load Data
     refs_data = load_files(ref_files)
-    mix_data, _ = sf.read(mix_file)
-    raw_data = load_files(raw_files)
+    mix_data, fs = sf.read(mix_file)
 
-    soft_data = []
-    if has_soft:
-        soft_data = load_files(soft_files)
+    fasnet_data = load_files(fasnet_files) if has_fasnet else []
+    mvdr_data = load_files(mvdr_files) if has_mvdr else []
+    polish_data = load_files(polish_files) if has_polish else []
 
-    hybrid_data = []
-    if has_hybrid:
-        hybrid_data = load_files(hybrid_files)
-
-    # 4. Find GLOBAL Minimum Length
-    lengths = [len(r) for r in refs_data] + \
-              [len(r) for r in raw_data] + \
-              [mix_data.shape[0]]
-
-    if has_soft:
-        lengths += [len(s) for s in soft_data]
-    if has_hybrid:
-        lengths += [len(h) for h in hybrid_data]
+    # 4. Global Truncation (Ensures all arrays match in length)
+    lengths = [len(r) for r in refs_data] + [mix_data.shape[0]]
+    if has_fasnet: lengths += [len(f) for f in fasnet_data]
+    if has_mvdr:   lengths += [len(m) for m in mvdr_data]
+    if has_polish: lengths += [len(p) for p in polish_data]
 
     min_len = min(lengths)
-    print(f"Trimming evaluation to {min_len} samples ({min_len / 16000:.2f} seconds)...")
+    print(f"Trimming evaluation to {min_len} samples...")
 
-    # 5. Crop and Stack Arrays
+    # 5. Prepare Stacks
     ref_stack = np.stack([r[:min_len] for r in refs_data])
 
-    # Mix Baseline (Crop and duplicate Ch0)
+    # Baseline (Mix)
     mix_mono = mix_data[:min_len, 0]
     mix_stack = np.stack([mix_mono, mix_mono])
 
-    # Raw Stack
-    raw_stack = np.stack([r[:min_len] for r in raw_data])
-
-    # Soft Stack
-    soft_stack = None
-    if has_soft:
-        soft_stack = np.stack([s[:min_len] for s in soft_data])
-
-    # Hybrid Stack
-    hybrid_stack = None
-    if has_hybrid:
-        hybrid_stack = np.stack([h[:min_len] for h in hybrid_data])
+    def get_stack(data):
+        return np.stack([d[:min_len] for d in data])
 
     # 6. Calculate Metrics
-    print("\nCalculating metrics (this usually takes a few seconds)...")
+    print("\nCalculating metrics (mir_eval)...")
 
-    # A. Baseline
-    sdr_b, sir_b, sar_b, _ = mir_eval.separation.bss_eval_sources(
-        ref_stack, mix_stack, compute_permutation=True
-    )
+    # A. Mix Baseline
+    sdr_b, sir_b, sar_b, _ = mir_eval.separation.bss_eval_sources(ref_stack, mix_stack, compute_permutation=True)
 
-    # B. Raw Model
-    sdr_r, sir_r, sar_r, _ = mir_eval.separation.bss_eval_sources(
-        ref_stack, raw_stack, compute_permutation=True
-    )
+    # B. FaSNet Output
+    res_f = mir_eval.separation.bss_eval_sources(ref_stack, get_stack(fasnet_data), True) if has_fasnet else None
 
-    # C. Soft Mask
-    sdr_s, sir_s, sar_s = None, None, None
-    if has_soft:
-        sdr_s, sir_s, sar_s, _ = mir_eval.separation.bss_eval_sources(
-            ref_stack, soft_stack, compute_permutation=True
-        )
+    # C. MVDR Hybrid
+    res_m = mir_eval.separation.bss_eval_sources(ref_stack, get_stack(mvdr_data), True) if has_mvdr else None
 
-    # D. Hybrid Mask
-    sdr_h, sir_h, sar_h = None, None, None
-    if has_hybrid:
-        sdr_h, sir_h, sar_h, _ = mir_eval.separation.bss_eval_sources(
-            ref_stack, hybrid_stack, compute_permutation=True
-        )
+    # D. MVDR Polish (Final)
+    res_p = mir_eval.separation.bss_eval_sources(ref_stack, get_stack(polish_data), True) if has_polish else None
 
-    # 7. Print Consolidated Table
-    print("\n" + "=" * 115)
-    # Adjust header formatting for the extra column
-    header = f"{'Metric':<8} | {'Mix':<10} | {'Raw (FaSNet)':<15} | {'Soft Mask':<15} | {'Hybrid Mask':<15} | {'Best Gain':<10}"
+    # 7. Print Table
+    print("\n" + "=" * 130)
+    header = f"{'Metric':<8} | {'Mix':<10} | {'FaSNet':<18} | {'MVDR Hybrid':<18} | {'MVDR Polish':<18} | {'Improvement':<10}"
     print(header)
-    print("-" * 115)
+    print("-" * 130)
 
-    def print_row(name, base, raw, soft, hybrid):
-        avg_b = np.mean(base)
-        avg_r = np.mean(raw)
+    def print_row(name, idx, base_val):
+        row = f"{name:<8} | {base_val:<10.2f} | "
 
-        # Prepare values for printing
-        val_soft = np.mean(soft) if soft is not None else 0.0
-        str_soft = f"{val_soft:<15.2f}" if soft is not None else f"{'N/A':<15}"
+        val_f = np.mean(res_f[idx]) if res_f else 0.0
+        val_m = np.mean(res_m[idx]) if res_m else 0.0
+        val_p = np.mean(res_p[idx]) if res_p else 0.0
 
-        val_hybrid = np.mean(hybrid) if hybrid is not None else 0.0
-        str_hybrid = f"{val_hybrid:<15.2f}" if hybrid is not None else f"{'N/A':<15}"
+        row += f"{val_f:<18.2f} | {val_m:<18.2f} | {val_p:<18.2f} | "
 
-        # Calculate max gain (Hybrid vs Mix)
-        # You can change this to compare vs Raw if preferred
-        current_best = avg_r
-        if soft is not None: current_best = max(current_best, val_soft)
-        if hybrid is not None: current_best = max(current_best, val_hybrid)
+        # Improvement: Best output vs Mix
+        best_val = max(val_f, val_m, val_p)
+        gain = best_val - base_val
+        row += f"+{gain:.2f} dB"
+        print(row)
 
-        gain = current_best - avg_b
-
-        print(f"{name:<8} | {avg_b:<10.2f} | {avg_r:<15.2f} | {str_soft} | {str_hybrid} | +{gain:.2f} dB")
-
-    print_row("SDR", sdr_b, sdr_r, sdr_s, sdr_h)
-    print_row("SIR", sir_b, sir_r, sir_s, sir_h)
-    print_row("SAR", sar_b, sar_r, sar_s, sar_h)
-    print("-" * 115)
-
-    if has_hybrid and has_soft:
-        print("\nComparison Note:")
-        print("* Soft Mask: Better SAR (Smoother audio, fewer artifacts)")
-        print("* Hybrid Mask: Better SIR (Better separation, less noise)")
+    print_row("SDR", 0, np.mean(sdr_b))
+    print_row("SIR", 1, np.mean(sir_b))
+    print_row("SAR", 2, np.mean(sar_b))
+    print("-" * 130)
 
 
 if __name__ == "__main__":
