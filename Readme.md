@@ -1,7 +1,3 @@
-This README is designed to present your project professionally, highlighting the advanced **Symmetric Geometry** and the **Hybrid MVDR** approach you implemented.
-
----
-
 # Multichannel Blind Source Separation (FaSNet-TAC + Hybrid MVDR)
 
 This project implements a high-fidelity pipeline for **Blind Source Separation (BSS)** of audio signals. It leverages the symmetric properties of a multichannel microphone array to separate two overlapping speakers in a simulated acoustic environment.
@@ -95,4 +91,5 @@ Typical performance on symmetric mixtures:
 | **SDR** | ~8.5 dB | Overall signal quality. |
 
 ---
+
 
